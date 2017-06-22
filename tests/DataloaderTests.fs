@@ -52,6 +52,7 @@ type BlogDataSource() =
             |> List.iter(fun b ->
                 match b.Request with
                 | FetchPosts -> 
+                    printfn "Cache Test!"
                     let ids = env.PostIds
                     b.Status := FetchSuccess(box ids)
                 | FetchPostContent id ->
@@ -66,6 +67,7 @@ let main args =
     let fetchPostContent id = Fetch.dataFetch<PostContent option, BlogRequest> source (FetchPostContent id)
     let contents =
         fetchPostIds
+        |> Fetch.bind(fun _ -> fetchPostIds)
         |> Fetch.bind((List.head >> fetchPostContent))
     let res =  Fetch.runFetch contents
     printfn "Results: %A" res
