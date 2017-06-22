@@ -20,19 +20,6 @@ let env = {
 // The original HAXL library relies HEAVYILY on GADTS for request types
 // This presents some problems for F#, as we don't have that great of a way of 
 // expressing that.
-// type FetchPostIdRequest =
-//     | FetchPosts //of Blog<Enviroment, PostId list>
-//     interface Request<PostId list> with
-//         member x.Identifier = 
-//             match x with
-//             | FetchPosts _ -> "PostIdRequest"
-
-// type FetchPostContentRequest = 
-//     | FetchPostContent of PostId
-//     interface Request<PostContent option> with
-//         member x.Identifier = 
-//             match x with
-//             | FetchPostContent id -> "PostContent id = " + id.ToString()
 
 type BlogRequest =
     | FetchPosts
@@ -52,7 +39,6 @@ type BlogDataSource() =
             |> List.iter(fun b ->
                 match b.Request with
                 | FetchPosts -> 
-                    printfn "Cache Test!"
                     let ids = env.PostIds
                     b.Status := FetchSuccess(box ids)
                 | FetchPostContent id ->
@@ -67,8 +53,8 @@ let main args =
     let fetchPostContent id = Fetch.dataFetch<PostContent option, BlogRequest> source (FetchPostContent id)
     let contents =
         fetchPostIds
-        |> Fetch.bind(fun _ -> fetchPostIds)
-        |> Fetch.bind((List.head >> fetchPostContent))
+        |> Fetch.map(@)
+        |> Fetch.applyTo(fetchPostIds)
     let res =  Fetch.runFetch contents
     printfn "Results: %A" res
     0

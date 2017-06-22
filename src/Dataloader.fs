@@ -20,6 +20,9 @@ and FetchStatus<'a> =
     | FetchSuccess of 'a
     | FetchError of exn
 
+and PerformFetch =
+    | SyncFetch 
+    | AsyncFetch of Async<unit>
 
 /// Represents an untyped Request, used to power the caching side
 and Request = 
@@ -27,10 +30,10 @@ and Request =
 
 and DataSource = 
     abstract Name : string
-    abstract FetchFn : (BlockedRequest list -> unit)
+    abstract FetchFn : (BlockedRequest list -> PerformFetch)
 
 and DataSource<'r when 'r :> Request> =
-    abstract FetchFn : BlockedFetch<'r> list -> unit
+    abstract FetchFn : BlockedFetch<'r> list -> PerformFetch
     abstract Name : string
 
 and BlockedFetch<'r> = {
@@ -72,9 +75,15 @@ module internal RequestStore =
         | Some (_ ,requests) -> Store(Map.add name (source, r::requests) map)
         | None -> Store(Map.add name (source, [r]) map)
     
-    let resolve (fn: DataSource -> BlockedRequest list -> unit) (store: RequestStore) =
+    let resolve (fn: DataSource -> BlockedRequest list -> PerformFetch) (store: RequestStore) =
         let (Store map) = store
-        Map.iter (fun _ (s, b) -> fn s b) map
+        let asyncs = 
+            Map.fold(fun acc _ (s, b) -> 
+                match fn s b with
+                | SyncFetch -> acc
+                | AsyncFetch a -> a::acc) [] map
+        asyncs |> Async.Parallel |> Async.RunSynchronously |> ignore
+
 
 
 [<RequireQualifiedAccess>]
@@ -90,13 +99,13 @@ module Fetch =
         { unFetch = unFetch }
 
     /// Applies some wrapped function f to the inner value of a
-    let rec apply f a =
+    let rec applyTo (a: Fetch<'a>) (f: Fetch<('a -> 'b)>) =
         let unFetch = fun cacheRef storeRef ->
-            match f.unFetch cacheRef storeRef, a.unFetch cacheRef storeRef with
-            | Done f', Done a' -> Done(f' a')
-            | Done f', Blocked(br, a') -> Blocked(br, map f' a')
-            | Blocked(br, f'), Done a' -> Blocked(br, apply f' { unFetch = fun cacheRef storeRef -> Done a' })
-            | Blocked(br1, f'), Blocked(br2, a') -> Blocked(br1@br2, apply f' a')
+            match a.unFetch cacheRef storeRef, f.unFetch cacheRef storeRef with
+            | Done a', Done f' -> Done(f' a')
+            | Done a', Blocked(br, f') -> Blocked(br, applyTo { unFetch = fun cacheRef storeRef -> Done a' } f')
+            | Blocked(br, a'), Done(f') -> Blocked(br, map f' a')
+            | Blocked(br1, a'), Blocked(br2, f') -> Blocked(br1@br2, applyTo  a' f')
             | FailedWith exn, _ -> FailedWith exn
             | _, FailedWith exn -> FailedWith exn
         { unFetch = unFetch }
