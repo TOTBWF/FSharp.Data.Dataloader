@@ -74,8 +74,10 @@ module internal DataCache =
     
     let get (r: Request) (c: DataCache) =
         match c.TryGetValue(r.Identifier) with
-        | true, status -> Some status
-        | false, _ -> None
+        | true, status -> 
+            Some status
+        | false, _ -> 
+            None
 
 [<RequireQualifiedAccess>]
 module internal RequestStore =
@@ -189,6 +191,8 @@ module Fetch =
             | Done a -> a
             | Blocked(br, cont) ->
                 performFetches (!storeRef)
+                // Clear out the request cache
+                storeRef := RequestStore.empty()
                 helper cont
             | FailedWith ex -> raise ex
         helper fetch
