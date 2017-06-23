@@ -31,27 +31,36 @@ and PerformFetch =
 and Request = 
     abstract Identifier : string
 
+/// Untyped version of Datasource, used primarily for heterogenous caches
 and DataSource = 
     abstract Name : string
     abstract FetchFn : (BlockedRequest list -> PerformFetch)
 
+/// A source of data that will be fetched from, with Request type 'r
 and DataSource<'r when 'r :> Request> =
+    /// Applied for every blocked request in a given round
     abstract FetchFn : BlockedFetch<'r> list -> PerformFetch
+    /// Used to uniquely identify the datasource
     abstract Name : string
 
+/// Metadata for a blocked request
 and BlockedFetch<'r> = {
     Request: 'r
     Status: FetchStatus<obj> ref
 }
+
+/// Untyped version of BlockedFetch, used primarily for our cache
 and BlockedRequest = {
     Request: obj
     Status: FetchStatus<obj> ref
 }
 
+/// When a reques
 and DataCache = ConcurrentDictionary<string, FetchStatus<obj> ref>
 
 /// When a request is issued by the client via a 'dataFetch',
 /// It is placed in the RequestStore. When we are ready to fetch a batch of requests,
+/// 'performFetch' is called
 and RequestStore = ConcurrentDictionary<string, DataSource * BlockedRequest list>
 
 
@@ -158,8 +167,8 @@ module Fetch =
                         member x.Name = d.Name
                         member x.FetchFn = List.map(fun b -> { BlockedFetch.Request = b.Request :?> 'r; Status = b.Status}) >> d.FetchFn
                     }
-                cacheRef := DataCache.add a statusRef cache
-                storeRef := RequestStore.addRequest blockedReq datasource !storeRef
+                DataCache.add a statusRef cache |> ignore
+                RequestStore.addRequest blockedReq datasource !storeRef |> ignore
                 Blocked([blockedReq], cont statusRef)
         { unFetch = unFetch }
     
