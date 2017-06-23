@@ -35,6 +35,7 @@ type BlogDataSource() =
     interface DataSource<BlogRequest> with
         member x.Name = "Blog"
         member x.FetchFn (blocked: BlockedFetch<BlogRequest> list) = 
+            // This is where you could do batching, concurrency, asynchronicity, etc
             blocked
             |> List.iter(fun b ->
                 match b.Request with
@@ -54,8 +55,7 @@ let main args =
     let fetchPostContent id = Fetch.dataFetch<PostContent option, BlogRequest> source (FetchPostContent id)
     let contents =
         fetchPostIds
-        |> Fetch.map(@)
-        |> Fetch.applyTo(fetchPostIds)
+        |> Fetch.bind(Fetch.mapSeq fetchPostContent)
     let res =  Fetch.runFetch contents
     printfn "Results: %A" res
     0

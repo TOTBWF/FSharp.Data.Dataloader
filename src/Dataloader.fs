@@ -2,6 +2,7 @@ module FSharp.Data.Dataloader
 
 open System
 open System.Reflection
+open System.Collections.Concurrent
 /// Represents an instruction to the system on how to fetch a value of type 'a
 
 /// Type encapsulating the delayed resolution of a Result
@@ -47,45 +48,41 @@ and BlockedRequest = {
     Status: FetchStatus<obj> ref
 }
 
-and DataCache = Cache of Map<string, FetchStatus<obj> ref>
-
+and DataCache = ConcurrentDictionary<string, FetchStatus<obj> ref>
 
 /// When a request is issued by the client via a 'dataFetch',
 /// It is placed in the RequestStore. When we are ready to fetch a batch of requests,
-/// TODO
-and RequestStore = Store of Map<string, DataSource * BlockedRequest list>
+and RequestStore = ConcurrentDictionary<string, DataSource * BlockedRequest list>
+
 
 
 [<RequireQualifiedAccess>]
 module internal DataCache =
-    let empty () = Cache(Map.empty)
-    let add (r: Request) (status: FetchStatus<obj> ref) (c: DataCache) =
-        let (Cache c') = c
-        Cache(Map.add r.Identifier status c')
+    let empty (): DataCache = new ConcurrentDictionary<string, FetchStatus<obj> ref>()
+    let add (r: Request) (status: FetchStatus<obj> ref) (c: DataCache): DataCache =
+        c.AddOrUpdate(r.Identifier, status, (fun _ _ -> status)) |> ignore
+        c
     
     let get (r: Request) (c: DataCache) =
-        let (Cache c') = c
-        Map.tryFind r.Identifier c'
+        match c.TryGetValue(r.Identifier) with
+        | true, status -> Some status
+        | false, _ -> None
 
 [<RequireQualifiedAccess>]
 module internal RequestStore =
-    let empty () = Store(Map.empty)
+    let empty (): RequestStore = new ConcurrentDictionary<string, DataSource * BlockedRequest list>()
     let addRequest (r: BlockedRequest) (source: DataSource) (store: RequestStore) =
-        let (Store map) = store
-        let name = source.Name
-        match Map.tryFind name map with
-        | Some (_ ,requests) -> Store(Map.add name (source, r::requests) map)
-        | None -> Store(Map.add name (source, [r]) map)
+        store.AddOrUpdate(source.Name, (source, [r]), (fun _ (_, requests) -> (source, r::requests))) |> ignore
+        store
     
     let resolve (fn: DataSource -> BlockedRequest list -> PerformFetch) (store: RequestStore) =
-        let (Store map) = store
         let asyncs = 
-            Map.fold(fun acc _ (s, b) -> 
+            store
+            |> Seq.fold(fun acc (KeyValue(_, (s, b))) -> 
                 match fn s b with
                 | SyncFetch _ -> acc
-                | AsyncFetch a -> a::acc) [] map
+                | AsyncFetch a -> a::acc) [] 
         asyncs |> Async.Parallel |> Async.RunSynchronously |> ignore
-
 
 [<RequireQualifiedAccess>]
 module Fetch =
@@ -124,6 +121,8 @@ module Fetch =
     let mapSeq (f: 'a -> Fetch<'b>) (a: seq<'a>) =
         let cons (x: 'a) ys = (f x) |> map(fun v -> Seq.append [v]) |> applyTo ys
         Seq.foldBack cons a (lift Seq.empty)
+    
+    
     
     /// Transforms a request into a fetch operation
     let dataFetch<'a, 'r when 'r :> Request> (d: DataSource<'r>) (a: Request): Fetch<'a> =
