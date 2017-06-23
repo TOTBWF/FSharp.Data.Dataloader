@@ -44,6 +44,7 @@ type BlogDataSource() =
                 | FetchPostContent id ->
                     let content = Map.tryFind id env.PostContents
                     b.Status := FetchSuccess(box content))
+            |> SyncFetch
 
 [<EntryPoint>]
 let main args = 

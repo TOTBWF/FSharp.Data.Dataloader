@@ -20,8 +20,10 @@ and FetchStatus<'a> =
     | FetchSuccess of 'a
     | FetchError of exn
 
+/// Result type of a fetch
+/// If the result type is asynchronous then all results will be batched
 and PerformFetch =
-    | SyncFetch 
+    | SyncFetch of unit
     | AsyncFetch of Async<unit>
 
 /// Represents an untyped Request, used to power the caching side
@@ -80,15 +82,14 @@ module internal RequestStore =
         let asyncs = 
             Map.fold(fun acc _ (s, b) -> 
                 match fn s b with
-                | SyncFetch -> acc
+                | SyncFetch _ -> acc
                 | AsyncFetch a -> a::acc) [] map
         asyncs |> Async.Parallel |> Async.RunSynchronously |> ignore
 
 
-
 [<RequireQualifiedAccess>]
 module Fetch =
-
+    let lift a = { unFetch = fun cache req -> Done(a)}
     /// Applies a mapping function f to the inner value of a
     let rec map f a =
         let unFetch = fun cacheRef storeRef ->
@@ -118,6 +119,11 @@ module Fetch =
             | Blocked(br, x) -> Blocked(br, bind f x)
             | FailedWith exn -> FailedWith exn
         { unFetch = unFetch }
+    
+    /// Applies a bind function to a sequence of values, production a fetch of a sequence
+    let mapSeq (f: 'a -> Fetch<'b>) (a: seq<'a>) =
+        let cons (x: 'a) ys = (f x) |> map(fun v -> Seq.append [v]) |> applyTo ys
+        Seq.foldBack cons a (lift Seq.empty)
     
     /// Transforms a request into a fetch operation
     let dataFetch<'a, 'r when 'r :> Request> (d: DataSource<'r>) (a: Request): Fetch<'a> =
