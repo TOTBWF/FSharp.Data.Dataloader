@@ -3,11 +3,15 @@ module FSharp.Data.Dataloader
 open System
 open System.Reflection
 open System.Collections.Concurrent
+
 /// Represents an instruction to the system on how to fetch a value of type 'a
+type Fetch<'a> = { unFetch : Enviroment -> Result<'a> }
 
-/// Type encapsulating the delayed resolution of a Result
-type Fetch<'a> = { unFetch : DataCache ref -> RequestStore ref -> Result<'a> }
-
+and Enviroment = {
+    Cache : DataCache ref
+    Store : RequestStore ref
+    Trace : bool
+}
 /// Type representing the result of a data fetch
 /// Done represents a completed fetch with value of type 'a
 and Result<'a> =
@@ -25,7 +29,7 @@ and FetchStatus<'a> =
 /// If the result type is asynchronous then all results will be batched
 and PerformFetch =
     | SyncFetch of unit
-    | AsyncFetch of Async<unit>
+    | AsyncFetch of Async<unit []>
 
 /// Represents an untyped Request, used to power the caching side
 and Request = 
@@ -63,8 +67,6 @@ and DataCache = ConcurrentDictionary<string, FetchStatus<obj> ref>
 /// 'performFetch' is called
 and RequestStore = ConcurrentDictionary<string, DataSource * BlockedRequest list>
 
-
-
 [<RequireQualifiedAccess>]
 module internal DataCache =
     let empty (): DataCache = new ConcurrentDictionary<string, FetchStatus<obj> ref>()
@@ -97,11 +99,13 @@ module internal RequestStore =
 
 [<RequireQualifiedAccess>]
 module Fetch =
-    let lift a = { unFetch = fun cache req -> Done(a)}
+    let lift a = { unFetch = fun env -> Done(a)}
+
+    let failedwith exn = { unFetch = fun env -> FailedWith exn}
     /// Applies a mapping function f to the inner value of a
     let rec map f a =
-        let unFetch = fun cacheRef storeRef ->
-            match a.unFetch cacheRef storeRef with
+        let unFetch = fun env ->
+            match a.unFetch env with
             | Done x -> Done(f x)
             | Blocked (br, c) -> Blocked(br, (map f c))
             | FailedWith exn -> FailedWith exn
@@ -109,21 +113,21 @@ module Fetch =
 
     /// Applies some wrapped function f to the inner value of a
     let rec applyTo (a: Fetch<'a>) (f: Fetch<('a -> 'b)>) =
-        let unFetch = fun cacheRef storeRef ->
-            match a.unFetch cacheRef storeRef, f.unFetch cacheRef storeRef with
+        let unFetch = fun env ->
+            match a.unFetch env, f.unFetch env with
             | Done a', Done f' -> Done(f' a')
-            | Done a', Blocked(br, f') -> Blocked(br, applyTo { unFetch = fun cacheRef storeRef -> Done a' } f')
+            | Done a', Blocked(br, f') -> Blocked(br, applyTo { unFetch = fun env -> Done a' } f')
             | Blocked(br, a'), Done(f') -> Blocked(br, map f' a')
-            | Blocked(br1, a'), Blocked(br2, f') -> Blocked(br1@br2, applyTo  a' f')
+            | Blocked(br1, a'), Blocked(br2, f') -> Blocked(br1@br2, applyTo a' f')
             | FailedWith exn, _ -> FailedWith exn
             | _, FailedWith exn -> FailedWith exn
         { unFetch = unFetch }
     
     /// Applies some binding function f to the inner value of a
     let rec bind f a =
-        let unFetch = fun cacheRef storeRef ->
-            match a.unFetch cacheRef storeRef with
-            | Done x -> (f x).unFetch cacheRef storeRef
+        let unFetch = fun env ->
+            match a.unFetch env with
+            | Done x -> (f x).unFetch env
             | Blocked(br, x) -> Blocked(br, bind f x)
             | FailedWith exn -> FailedWith exn
         { unFetch = unFetch }
@@ -133,33 +137,40 @@ module Fetch =
         let cons (x: 'a) ys = (f x) |> map(fun v -> Seq.append [v]) |> applyTo ys
         Seq.foldBack cons a (lift Seq.empty)
     
-    
+    /// Collects a seq of fetches into a singular fetch of sequences
+    let collect (a: seq<Fetch<'a>>): Fetch<seq<'a>> =
+        let cons (x: Fetch<'a>) ys = x |> map(fun v -> Seq.append [v]) |> applyTo ys
+        Seq.foldBack cons a (lift Seq.empty)
     
     /// Transforms a request into a fetch operation
     let dataFetch<'a, 'r when 'r :> Request> (d: DataSource<'r>) (a: Request): Fetch<'a> =
         let cont (statusRef: FetchStatus<obj> ref) = 
-            let unFetch cacheRef storeRef = 
+            let unFetch env = 
                 let status = !statusRef 
                 match status with
                 | FetchSuccess s -> Done(s :?> 'a)
                 | _ -> FailedWith (Failure "Expected Complete Fetch!")
             { unFetch = unFetch }
-        let unFetch cacheRef storeRef =
-            let cache = !cacheRef
+        let unFetch env =
+            let cache = !(env.Cache)
             // Do a lookup in the cache to see if we need to return 
             match DataCache.get a cache with
             | Some statusRef ->
                 match !statusRef with
                 | FetchSuccess (v:obj) ->
+                    if env.Trace then printfn "Request %s found in cache" a.Identifier
                     // We've seen the request before, and it is completed, so return the value
                     Done(v :?> 'a)
                 | NotFetched ->
+                    if env.Trace then printfn "Request %s found in request store" a.Identifier
                     // We've seen the request before, but it is blocked, but we dont add the request to the RequestStore
                     Blocked([], cont statusRef)
                 | FetchError ex ->
+                    if env.Trace then printfn "Request %s failed with exception %s" a.Identifier ex.Message
                     // There was an error, so add the failure as our result
                     FailedWith ex
             | None -> 
+                if env.Trace then printfn "Request %s not found in either request store or cache" a.Identifier
                 // We haven't seen the request before, so add it to the request store so it will be fetched in the next round
                 let statusRef = ref NotFetched
                 let blockedReq = {Request = box a; Status = statusRef}
@@ -170,7 +181,7 @@ module Fetch =
                         member x.FetchFn = List.map(fun b -> { BlockedFetch.Request = b.Request :?> 'r; Status = b.Status}) >> d.FetchFn
                     }
                 DataCache.add a statusRef cache |> ignore
-                RequestStore.addRequest blockedReq datasource !storeRef |> ignore
+                RequestStore.addRequest blockedReq datasource !(env.Store) |> ignore
                 Blocked([blockedReq], cont statusRef)
         { unFetch = unFetch }
     
@@ -179,20 +190,20 @@ module Fetch =
     let performFetches (store: RequestStore) =
         RequestStore.resolve(fun source blocked -> source.FetchFn blocked) store
 
-
-
     /// Executes a fetch using fn to resolve the blocked requests
     /// Fn should fill in the reference value of the BlockedRequest
-    let runFetch fetch =
-        let storeRef = ref (RequestStore.empty ()) 
-        let cacheRef = ref (DataCache.empty ())
+    let runFetch trace fetch =
+        let env = { Cache = ref (DataCache.empty ()); Store = ref (RequestStore.empty ()) ; Trace = trace}
         let rec helper f =
-            match fetch.unFetch cacheRef storeRef with
-            | Done a -> a
+            match f.unFetch env with
+            | Done a -> 
+                if trace then printfn "Fetch is completed!"
+                a
             | Blocked(br, cont) ->
-                performFetches (!storeRef)
+                if trace then printfn "Beginning fetch with round size %d" br.Length
+                performFetches (!(env.Store))
                 // Clear out the request cache
-                storeRef := RequestStore.empty()
+                env.Store := RequestStore.empty()
                 helper cont
             | FailedWith ex -> raise ex
         helper fetch

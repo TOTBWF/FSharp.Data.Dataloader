@@ -9,7 +9,7 @@ type PostId = int
 type PostContent = string
 type Enviroment = {
     PostIds : PostId list
-    PostContents : Map<PostId, PostContent>
+    PostContents : Map<PostId, string>
 }
 
 let env = {
@@ -52,10 +52,18 @@ let main args =
     printfn "Starting Fetch!"
     let source = BlogDataSource()
     let fetchPostIds = Fetch.dataFetch<PostId list, BlogRequest> source (FetchPosts)
-    let fetchPostContent id = Fetch.dataFetch<PostContent option, BlogRequest> source (FetchPostContent id)
-    let contents =
+    let fetchPostContent id = Fetch.dataFetch<string option, BlogRequest> source (FetchPostContent id)
+    let renderPosts postIds posts = 
+        List.zip postIds posts
+        |> List.map(fun (c, id) -> sprintf "Id: %d\nPost: %s" c id) |> List.fold(fun acc e -> e + "\n" + acc) ""
+    let posts = 
         fetchPostIds
         |> Fetch.bind(Fetch.mapSeq fetchPostContent)
-    let res =  Fetch.runFetch contents
-    printfn "Results: %A" res
+        |> Fetch.map(Seq.map(Option.defaultWith(fun () -> "")) >> Seq.toList)
+    let contents =
+        fetchPostIds
+        |> Fetch.map(renderPosts)
+        |> Fetch.applyTo posts
+    let res =  Fetch.runFetch true contents
+    printfn "Results:\n%s" res
     0
