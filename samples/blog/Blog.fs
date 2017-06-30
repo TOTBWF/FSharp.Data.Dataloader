@@ -21,27 +21,27 @@ let env = {
 // This presents some problems for F#, as we don't have that great of a way of 
 // expressing that.
 
-type BlogRequest =
-    | FetchPosts
-    | FetchPostContent of PostId
-    interface Request with
+type BlogRequest<'a> =
+    | FetchPosts of (PostId list -> 'a)
+    | FetchPostContent of PostId * (PostContent option -> 'a)
+    interface Request<'a> with
         member x.Identifier =
             match x with
-            | FetchPosts -> "FetchPosts"
-            | FetchPostContent id -> "FetchContent id = " + id.ToString()
+            | FetchPosts _ -> "FetchPosts"
+            | FetchPostContent(id, _) -> "FetchContent id = " + id.ToString()
         
 
-let blogDataSource = 
-    let fetchfn (blocked: BlockedFetch<BlogRequest> list) = 
+let blogDataSource() = 
+    let fetchfn (blocked: BlockedFetch<'a, BlogRequest<'a>> list) = 
         blocked
         |> List.iter(fun b ->
             match b.Request with
-            | FetchPosts -> 
+            | FetchPosts cont -> 
                 let ids = env.PostIds
-                FetchResult.putSuccess (b.Status) (box ids)
-            | FetchPostContent id ->
+                FetchResult.putSuccess (b.Status) (cont ids)
+            | FetchPostContent(id, cont) ->
                 let content = Map.tryFind id env.PostContents
-                FetchResult.putSuccess (b.Status) (box content))
+                FetchResult.putSuccess (b.Status) (cont content))
         |> SyncFetch
     DataSource.create "Blog" fetchfn 
 
@@ -49,8 +49,8 @@ let blogDataSource =
 [<EntryPoint>]
 let main args = 
     printfn "Starting Fetch!"
-    let fetchPostIds = Fetch.dataFetch<PostId list, BlogRequest> blogDataSource (FetchPosts)
-    let fetchPostContent id = Fetch.dataFetch<string option, BlogRequest> blogDataSource (FetchPostContent id)
+    let fetchPostIds = Fetch.dataFetch<PostId list, BlogRequest<PostId list>> (blogDataSource()) (FetchPosts id)
+    let fetchPostContent postId = Fetch.dataFetch<PostContent option, BlogRequest<PostContent option>> (blogDataSource()) (FetchPostContent(postId, id))
     let renderPosts postIds posts = 
         List.zip postIds posts
         |> List.map(fun (c, id) -> sprintf "Id: %d\nPost: %s" c id) |> List.fold(fun acc e -> e + "\n" + acc) ""

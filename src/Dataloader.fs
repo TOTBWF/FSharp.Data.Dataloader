@@ -16,7 +16,7 @@ type Enviroment = {
 /// Done represents a completed fetch with value of type 'a
 type Result<'a> =
     | Done of 'a
-    | Blocked of BlockedRequest list * Fetch<'a>
+    | Blocked of BlockedFetch list * Fetch<'a>
     | FailedWith of exn
 
 /// Type representing the status of a blocked request
@@ -25,7 +25,37 @@ type FetchStatus<'a> =
     | FetchSuccess of 'a
     | FetchError of exn
 
-type FetchResult<'a> = FetchRef of FetchStatus<'a> ref
+type FetchResult = 
+    abstract GetStatus : unit -> FetchStatus<obj>
+    abstract SetStatus : FetchStatus<obj> -> unit
+
+type FetchResult<'a> = 
+    inherit FetchResult
+    abstract GetStatus : unit -> FetchStatus<'a>
+    abstract SetStatus : FetchStatus<'a> -> unit
+
+/// Creates a wrapper around a mutable status value, with typed and untyped accessors
+type internal FetchResultDefinition<'a>(status: FetchStatus<'a>) = 
+    let boxStatus s = 
+        match s with
+        | NotFetched -> NotFetched
+        | FetchSuccess a -> FetchSuccess (box a)
+        | FetchError exn -> FetchError exn
+
+    let unboxStatus (s: FetchStatus<obj>) = 
+        match s with
+        | NotFetched -> NotFetched
+        | FetchSuccess o -> FetchSuccess (unbox o)
+        | FetchError exn -> FetchError exn
+    let mutable (__status: FetchStatus<obj>) = boxStatus status
+    interface FetchResult<'a> with
+        member x.GetStatus () = unboxStatus __status
+        member x.SetStatus status = __status <- (boxStatus status)
+
+    interface FetchResult with
+        member x.GetStatus () = __status
+        member x.SetStatus status = __status <- status
+
 
 /// Result type of a fetch
 /// If the result type is asynchronous then all results will be batched
@@ -37,75 +67,83 @@ type PerformFetch =
 type Request = 
     abstract Identifier : string
 
+type Request<'a> =  
+    inherit Request
+
 /// Untyped version of Datasource, used primarily for heterogenous caches
 type DataSource = 
     abstract Name : string
-    abstract FetchFn : BlockedRequest list -> PerformFetch
+    abstract FetchFn : BlockedFetch list -> PerformFetch
 
 /// A source of data that will be fetched from, with Request type 'r
-type DataSource<'r when 'r :> Request> =
+type DataSource<'a, 'r when 'r :> Request<'a>> =
     /// Applied for every blocked request in a given round
-    abstract FetchFn : BlockedFetch<'r> list -> PerformFetch
+    abstract FetchFn : BlockedFetch<'a, 'r> list -> PerformFetch
     inherit DataSource
 
-type DataSourceDefinition<'r when 'r :> Request> = 
+type internal DataSourceDefinition<'a, 'r when 'r :> Request<'a>> = 
     {
         Name : string
-        FetchFn : BlockedFetch<'r> list -> PerformFetch
+        FetchFn : BlockedFetch<'a, 'r> list -> PerformFetch
     }
     interface DataSource with
         member x.Name = x.Name
-        member x.FetchFn blocked = blocked |> List.map(fun b -> { BlockedFetch.Request = b.Request :?> 'r; Status = FetchRef(b.Status)}) |> x.FetchFn
-    interface DataSource<'r> with
+        member x.FetchFn blocked = blocked |> List.map(fun b -> b :?> BlockedFetch<'a, 'r>) |> x.FetchFn
+    interface DataSource<'a, 'r> with
         member x.FetchFn blocked = x.FetchFn blocked
     
 
 type BlockedFetch =
     abstract Request : obj
-    abstract Status : FetchStatus<obj> ref
+    abstract Status : FetchResult
 
-/// Metadata for a blocked request
-type BlockedFetch<'r> = {
-    Request: 'r
-    Status: FetchResult<obj>
-}
+type BlockedFetch<'a, 'r when 'r :> Request<'a>> =
+    abstract Request : 'r
+    abstract Status : FetchResult<'a>
+    inherit BlockedFetch
 
-/// Untyped version of BlockedFetch, used primarily for our cache
-type BlockedRequest = {
-    Request: obj
-    Status: FetchStatus<obj> ref
-}
+type internal BlockedFetchDefinition<'a, 'r when 'r :> Request<'a>> = 
+    {
+        Request : 'r
+        Status : FetchResult<'a>
+    }
+    interface BlockedFetch<'a, 'r> with
+        member x.Request = x.Request
+        member x.Status = x.Status
+    interface BlockedFetch with
+        member x.Request = box x.Request
+        member x.Status = upcast x.Status
 
 /// When a reques
-type DataCache = ConcurrentDictionary<string, FetchStatus<obj> ref>
+type DataCache = ConcurrentDictionary<string, FetchResult>
 
 /// When a request is issued by the client via a 'dataFetch',
 /// It is placed in the RequestStore. When we are ready to fetch a batch of requests,
 /// 'performFetch' is called
-type RequestStore = ConcurrentDictionary<string, DataSource * BlockedRequest list>
+type RequestStore = ConcurrentDictionary<string, DataSource * BlockedFetch list>
 
 [<RequireQualifiedAccess>]
 module internal DataCache =
-    let empty (): DataCache = new ConcurrentDictionary<string, FetchStatus<obj> ref>()
-    let add (r: Request) (status: FetchStatus<obj> ref) (c: DataCache): DataCache =
+    let empty (): DataCache = new ConcurrentDictionary<string, FetchResult>()
+    let add (r: Request) (status: FetchResult) (c: DataCache): DataCache =
         c.AddOrUpdate(r.Identifier, status, (fun _ _ -> status)) |> ignore
         c
     
-    let get (r: Request) (c: DataCache) =
+    let get<'a> (r: Request) (c: DataCache): FetchResult<'a> option =
         match c.TryGetValue(r.Identifier) with
         | true, status -> 
-            Some status
+            Some (downcast status)
         | false, _ -> 
             None
 
 [<RequireQualifiedAccess>]
 module internal RequestStore =
-    let empty (): RequestStore = new ConcurrentDictionary<string, DataSource * BlockedRequest list>()
-    let addRequest (r: BlockedRequest) (source: DataSource) (store: RequestStore) =
+    let empty (): RequestStore = new ConcurrentDictionary<string, DataSource * BlockedFetch list>()
+    let addRequest (r: BlockedFetch) (source: DataSource) (store: RequestStore) =
         store.AddOrUpdate(source.Name, (source, [r]), (fun _ (_, requests) -> (source, r::requests))) |> ignore
         store
     
-    let resolve (fn: DataSource -> BlockedRequest list -> PerformFetch) (store: RequestStore) =
+    let resolve (fn: DataSource -> BlockedFetch list -> PerformFetch) (store: RequestStore) =
         let asyncs = 
             store
             |> Seq.fold(fun acc (KeyValue(_, (s, b))) -> 
@@ -117,16 +155,15 @@ module internal RequestStore =
 [<RequireQualifiedAccess>]
 module FetchResult =
     let putSuccess (f: FetchResult<'a>) (v: 'a) =
-        let (FetchRef(ref)) = f
-        ref := FetchSuccess(v)
+        f.SetStatus(FetchSuccess(v))
     
     let putFailure (f: FetchResult<'a>) (e: exn)=
-        let (FetchRef(ref)) = f
-        ref := FetchError(e)
+        let (fe: FetchStatus<'a>) = FetchError(e)
+        f.SetStatus(fe)
 
 [<RequireQualifiedAccess>]
 module DataSource =
-    let create (name: string) (fetchfn: BlockedFetch<'r> list -> PerformFetch): DataSource<'r> = upcast { DataSourceDefinition.Name = name; FetchFn = fetchfn }  
+    let create (name: string) (fetchfn: BlockedFetch<'a, 'r> list -> PerformFetch): DataSource<'a, 'r> = upcast { DataSourceDefinition.Name = name; FetchFn = fetchfn }  
 [<RequireQualifiedAccess>]
 module Fetch =
     let lift a = { unFetch = fun env -> Done(a)}
@@ -173,28 +210,27 @@ module Fetch =
         Seq.foldBack cons a (lift Seq.empty)
     
     /// Transforms a request into a fetch operation
-    let dataFetch<'a, 'r when 'r :> Request> (d: DataSource<'r>) (a: Request): Fetch<'a> =
-        let cont (statusRef: FetchStatus<obj> ref) = 
+    let dataFetch<'a, 'r when 'r :> Request<'a>> (d: DataSource<'a, 'r>) (a: Request<'a>): Fetch<'a> =
+        let cont (statusWrapper: FetchResult<'a>) = 
             let unFetch env = 
-                let status = !statusRef 
-                match status with
-                | FetchSuccess s -> Done(s :?> 'a)
+                match statusWrapper.GetStatus() with
+                | FetchSuccess s -> Done(s)
                 | _ -> FailedWith (Failure "Expected Complete Fetch!")
             { unFetch = unFetch }
         let unFetch env =
             let cache = !(env.Cache)
             // Do a lookup in the cache to see if we need to return 
-            match DataCache.get a cache with
-            | Some statusRef ->
-                match !statusRef with
-                | FetchSuccess (v:obj) ->
+            match DataCache.get<'a> a cache with
+            | Some statusWrapper ->
+                match statusWrapper.GetStatus() with
+                | FetchSuccess v ->
                     if env.Trace then printfn "Request %s found in cache" a.Identifier
                     // We've seen the request before, and it is completed, so return the value
-                    Done(v :?> 'a)
+                    Done(v)
                 | NotFetched ->
                     if env.Trace then printfn "Request %s found in request store" a.Identifier
                     // We've seen the request before, but it is blocked, but we dont add the request to the RequestStore
-                    Blocked([], cont statusRef)
+                    Blocked([], cont statusWrapper)
                 | FetchError ex ->
                     if env.Trace then printfn "Request %s failed with exception %s" a.Identifier ex.Message
                     // There was an error, so add the failure as our result
@@ -202,12 +238,12 @@ module Fetch =
             | None -> 
                 if env.Trace then printfn "Request %s not found in either request store or cache" a.Identifier
                 // We haven't seen the request before, so add it to the request store so it will be fetched in the next round
-                let statusRef = ref NotFetched
-                let blockedReq = {Request = box a; Status = statusRef}
+                let status = FetchResultDefinition(NotFetched)
+                let blockedReq = {Request = a; Status = status}
                 // Update the cache and store references
-                DataCache.add a statusRef cache |> ignore
+                DataCache.add a status cache |> ignore
                 RequestStore.addRequest blockedReq d !(env.Store) |> ignore
-                Blocked([blockedReq], cont statusRef)
+                Blocked([blockedReq], cont status)
         { unFetch = unFetch }
     
     /// Issues a batch of fetches to the request store. After 
