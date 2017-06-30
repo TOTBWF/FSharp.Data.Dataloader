@@ -5,9 +5,9 @@ open System.Reflection
 open System.Collections.Concurrent
 
 /// Represents an instruction to the system on how to fetch a value of type 'a
-type Fetch<'a> = { unFetch : Enviroment -> Result<'a> }
+type Fetch<'a> = { unFetch : Environment -> Result<'a> }
 
-type Enviroment = {
+type Environment = {
     Cache : DataCache ref
     Store : RequestStore ref
     Trace : bool
