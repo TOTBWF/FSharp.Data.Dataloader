@@ -210,7 +210,7 @@ module Fetch =
         Seq.foldBack cons a (lift Seq.empty)
     
     /// Transforms a request into a fetch operation
-    let dataFetch<'a, 'r when 'r :> Request<'a>> (d: DataSource<'a, 'r>) (a: Request<'a>): Fetch<'a> =
+    let dataFetch<'a, 'r when 'r :> Request<'a>> (d: DataSource<'a, 'r>) (a: 'r): Fetch<'a> =
         let cont (statusWrapper: FetchResult<'a>) = 
             let unFetch env = 
                 match statusWrapper.GetStatus() with
