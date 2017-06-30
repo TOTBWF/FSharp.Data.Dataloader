@@ -49,8 +49,8 @@ let blogDataSource() =
 [<EntryPoint>]
 let main args = 
     printfn "Starting Fetch!"
-    let fetchPostIds = Fetch.dataFetch<PostId list, BlogRequest<PostId list>> (blogDataSource()) (FetchPosts id)
-    let fetchPostContent postId = Fetch.dataFetch<PostContent option, BlogRequest<PostContent option>> (blogDataSource()) (FetchPostContent(postId, id))
+    let fetchPostIds = Fetch.dataFetch<PostId list, BlogRequest<_>> (blogDataSource()) (FetchPosts id)
+    let fetchPostContent postId = Fetch.dataFetch<PostContent option, BlogRequest<_>> (blogDataSource()) (FetchPostContent(postId, id))
     let renderPosts postIds posts = 
         List.zip postIds posts
         |> List.map(fun (c, id) -> sprintf "Id: %d\nPost: %s" c id) |> List.fold(fun acc e -> e + "\n" + acc) ""
