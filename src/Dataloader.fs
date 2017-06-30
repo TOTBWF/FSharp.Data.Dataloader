@@ -1,4 +1,4 @@
-module FSharp.Data.Dataloader
+module rec FSharp.Data.Dataloader
 
 open System
 open System.Reflection
@@ -7,65 +7,65 @@ open System.Collections.Concurrent
 /// Represents an instruction to the system on how to fetch a value of type 'a
 type Fetch<'a> = { unFetch : Enviroment -> Result<'a> }
 
-and Enviroment = {
+type Enviroment = {
     Cache : DataCache ref
     Store : RequestStore ref
     Trace : bool
 }
 /// Type representing the result of a data fetch
 /// Done represents a completed fetch with value of type 'a
-and Result<'a> =
+type Result<'a> =
     | Done of 'a
     | Blocked of BlockedRequest list * Fetch<'a>
     | FailedWith of exn
 
 /// Type representing the status of a blocked request
-and FetchStatus<'a> =
+type FetchStatus<'a> =
     | NotFetched
     | FetchSuccess of 'a
     | FetchError of exn
 
 /// Result type of a fetch
 /// If the result type is asynchronous then all results will be batched
-and PerformFetch =
+type PerformFetch =
     | SyncFetch of unit
     | AsyncFetch of Async<unit []>
 
 /// Represents an untyped Request, used to power the caching side
-and Request = 
+type Request = 
     abstract Identifier : string
 
 /// Untyped version of Datasource, used primarily for heterogenous caches
-and DataSource = 
+type DataSource = 
     abstract Name : string
     abstract FetchFn : (BlockedRequest list -> PerformFetch)
 
 /// A source of data that will be fetched from, with Request type 'r
-and DataSource<'r when 'r :> Request> =
+type DataSource<'r when 'r :> Request> =
     /// Applied for every blocked request in a given round
     abstract FetchFn : BlockedFetch<'r> list -> PerformFetch
     /// Used to uniquely identify the datasource
     abstract Name : string
 
 /// Metadata for a blocked request
-and BlockedFetch<'r> = {
+type BlockedFetch<'r> = {
     Request: 'r
     Status: FetchStatus<obj> ref
 }
 
 /// Untyped version of BlockedFetch, used primarily for our cache
-and BlockedRequest = {
+type BlockedRequest = {
     Request: obj
     Status: FetchStatus<obj> ref
 }
 
 /// When a reques
-and DataCache = ConcurrentDictionary<string, FetchStatus<obj> ref>
+type DataCache = ConcurrentDictionary<string, FetchStatus<obj> ref>
 
 /// When a request is issued by the client via a 'dataFetch',
 /// It is placed in the RequestStore. When we are ready to fetch a batch of requests,
 /// 'performFetch' is called
-and RequestStore = ConcurrentDictionary<string, DataSource * BlockedRequest list>
+type RequestStore = ConcurrentDictionary<string, DataSource * BlockedRequest list>
 
 [<RequireQualifiedAccess>]
 module internal DataCache =
