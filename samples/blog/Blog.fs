@@ -31,28 +31,26 @@ type BlogRequest =
             | FetchPostContent id -> "FetchContent id = " + id.ToString()
         
 
-type BlogDataSource() = 
-    interface DataSource<BlogRequest> with
-        member x.Name = "Blog"
-        member x.FetchFn (blocked: BlockedFetch<BlogRequest> list) = 
-            // This is where you could do batching, concurrency, asynchronicity, etc
-            blocked
-            |> List.iter(fun b ->
-                match b.Request with
-                | FetchPosts -> 
-                    let ids = env.PostIds
-                    b.Status := FetchSuccess(box ids)
-                | FetchPostContent id ->
-                    let content = Map.tryFind id env.PostContents
-                    b.Status := FetchSuccess(box content))
-            |> SyncFetch
+let blogDataSource = 
+    let fetchfn (blocked: BlockedFetch<BlogRequest> list) = 
+        blocked
+        |> List.iter(fun b ->
+            match b.Request with
+            | FetchPosts -> 
+                let ids = env.PostIds
+                FetchResult.putSuccess (b.Status) (box ids)
+            | FetchPostContent id ->
+                let content = Map.tryFind id env.PostContents
+                FetchResult.putSuccess (b.Status) (box content))
+        |> SyncFetch
+    DataSource.create "Blog" fetchfn 
+
 
 [<EntryPoint>]
 let main args = 
     printfn "Starting Fetch!"
-    let source = BlogDataSource()
-    let fetchPostIds = Fetch.dataFetch<PostId list, BlogRequest> source (FetchPosts)
-    let fetchPostContent id = Fetch.dataFetch<string option, BlogRequest> source (FetchPostContent id)
+    let fetchPostIds = Fetch.dataFetch<PostId list, BlogRequest> blogDataSource (FetchPosts)
+    let fetchPostContent id = Fetch.dataFetch<string option, BlogRequest> blogDataSource (FetchPostContent id)
     let renderPosts postIds posts = 
         List.zip postIds posts
         |> List.map(fun (c, id) -> sprintf "Id: %d\nPost: %s" c id) |> List.fold(fun acc e -> e + "\n" + acc) ""

@@ -25,6 +25,8 @@ type FetchStatus<'a> =
     | FetchSuccess of 'a
     | FetchError of exn
 
+type FetchResult<'a> = FetchRef of FetchStatus<'a> ref
+
 /// Result type of a fetch
 /// If the result type is asynchronous then all results will be batched
 type PerformFetch =
@@ -38,19 +40,34 @@ type Request =
 /// Untyped version of Datasource, used primarily for heterogenous caches
 type DataSource = 
     abstract Name : string
-    abstract FetchFn : (BlockedRequest list -> PerformFetch)
+    abstract FetchFn : BlockedRequest list -> PerformFetch
 
 /// A source of data that will be fetched from, with Request type 'r
 type DataSource<'r when 'r :> Request> =
     /// Applied for every blocked request in a given round
     abstract FetchFn : BlockedFetch<'r> list -> PerformFetch
-    /// Used to uniquely identify the datasource
-    abstract Name : string
+    inherit DataSource
+
+type DataSourceDefinition<'r when 'r :> Request> = 
+    {
+        Name : string
+        FetchFn : BlockedFetch<'r> list -> PerformFetch
+    }
+    interface DataSource with
+        member x.Name = x.Name
+        member x.FetchFn blocked = blocked |> List.map(fun b -> { BlockedFetch.Request = b.Request :?> 'r; Status = FetchRef(b.Status)}) |> x.FetchFn
+    interface DataSource<'r> with
+        member x.FetchFn blocked = x.FetchFn blocked
+    
+
+type BlockedFetch =
+    abstract Request : obj
+    abstract Status : FetchStatus<obj> ref
 
 /// Metadata for a blocked request
 type BlockedFetch<'r> = {
     Request: 'r
-    Status: FetchStatus<obj> ref
+    Status: FetchResult<obj>
 }
 
 /// Untyped version of BlockedFetch, used primarily for our cache
@@ -97,6 +114,19 @@ module internal RequestStore =
                 | AsyncFetch a -> a::acc) [] 
         asyncs |> Async.Parallel |> Async.RunSynchronously |> ignore
 
+[<RequireQualifiedAccess>]
+module FetchResult =
+    let putSuccess (f: FetchResult<'a>) (v: 'a) =
+        let (FetchRef(ref)) = f
+        ref := FetchSuccess(v)
+    
+    let putFailure (f: FetchResult<'a>) (e: exn)=
+        let (FetchRef(ref)) = f
+        ref := FetchError(e)
+
+[<RequireQualifiedAccess>]
+module DataSource =
+    let create (name: string) (fetchfn: BlockedFetch<'r> list -> PerformFetch): DataSource<'r> = upcast { DataSourceDefinition.Name = name; FetchFn = fetchfn }  
 [<RequireQualifiedAccess>]
 module Fetch =
     let lift a = { unFetch = fun env -> Done(a)}
@@ -175,13 +205,8 @@ module Fetch =
                 let statusRef = ref NotFetched
                 let blockedReq = {Request = box a; Status = statusRef}
                 // Update the cache and store references
-                let datasource = 
-                    { new DataSource with 
-                        member x.Name = d.Name
-                        member x.FetchFn = List.map(fun b -> { BlockedFetch.Request = b.Request :?> 'r; Status = b.Status}) >> d.FetchFn
-                    }
                 DataCache.add a statusRef cache |> ignore
-                RequestStore.addRequest blockedReq datasource !(env.Store) |> ignore
+                RequestStore.addRequest blockedReq d !(env.Store) |> ignore
                 Blocked([blockedReq], cont statusRef)
         { unFetch = unFetch }
     
