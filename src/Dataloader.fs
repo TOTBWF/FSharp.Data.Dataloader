@@ -25,10 +25,12 @@ type FetchStatus<'a> =
     | FetchSuccess of 'a
     | FetchError of exn
 
+/// Untyped version of our FetchResult reference wrapper, used for caching
 type FetchResult = 
     abstract GetStatus : unit -> FetchStatus<obj>
     abstract SetStatus : FetchStatus<obj> -> unit
 
+/// Typed version of our FetchResult reference wrapper, to be presented to the user
 type FetchResult<'a> = 
     inherit FetchResult
     abstract GetStatus : unit -> FetchStatus<'a>
@@ -60,48 +62,56 @@ type internal FetchResultDefinition<'a>(status: FetchStatus<'a>) =
 /// Result type of a fetch
 /// If the result type is asynchronous then all results will be batched
 type PerformFetch =
-    | SyncFetch of unit
-    | AsyncFetch of Async<unit []>
+    | SyncFetch of (unit -> unit)
+    | AsyncFetch of (unit -> Async<unit>)
 
 /// Represents an untyped Request, used to power the caching side
 type Request = 
     abstract Identifier : string
 
+/// Represents an typed Request, used to implement the user defined request types
 type Request<'a> =  
     inherit Request
 
 /// Untyped version of Datasource, used primarily for heterogenous caches
 type DataSource = 
     abstract Name : string
-    abstract FetchFn : BlockedFetch list -> PerformFetch
+    abstract FetchFn : BlockedFetch list -> PerformFetch list
 
-/// A source of data that will be fetched from, with Request type 'r
+/// A source of data that will be fetched from
 type DataSource<'a, 'r when 'r :> Request<'a>> =
     /// Applied for every blocked request in a given round
-    abstract FetchFn : BlockedFetch<'a, 'r> list -> PerformFetch
+    abstract FetchFn : BlockedFetch<'a, 'r> list -> PerformFetch list
     inherit DataSource
 
+/// An implementation of the data source interfaces
+/// Used so that we can transform between typed and untyped versions
 type internal DataSourceDefinition<'a, 'r when 'r :> Request<'a>> = 
     {
         Name : string
-        FetchFn : BlockedFetch<'a, 'r> list -> PerformFetch
+        FetchFn : BlockedFetch<'a, 'r> list -> PerformFetch list
     }
     interface DataSource with
         member x.Name = x.Name
+        // Cast the list of blocked fetches to the typed variant, then feed them into the fetchFn
         member x.FetchFn blocked = blocked |> List.map(fun b -> b :?> BlockedFetch<'a, 'r>) |> x.FetchFn
     interface DataSource<'a, 'r> with
         member x.FetchFn blocked = x.FetchFn blocked
     
 
+/// Untyped verion of a blocked fetch, used for the internals of the library
 type BlockedFetch =
     abstract Request : obj
     abstract Status : FetchResult
 
+/// Typed version of a blocked fetch, presented to the user as a part of FetchFn
 type BlockedFetch<'a, 'r when 'r :> Request<'a>> =
     abstract Request : 'r
     abstract Status : FetchResult<'a>
     inherit BlockedFetch
 
+/// An implementation of the blockedFetch interfaces
+/// Used so that we can freely move between the typed and untyped versions 
 type internal BlockedFetchDefinition<'a, 'r when 'r :> Request<'a>> = 
     {
         Request : 'r
@@ -114,7 +124,7 @@ type internal BlockedFetchDefinition<'a, 'r when 'r :> Request<'a>> =
         member x.Request = box x.Request
         member x.Status = upcast x.Status
 
-/// When a reques
+/// Our cache of result values
 type DataCache = ConcurrentDictionary<string, FetchResult>
 
 /// When a request is issued by the client via a 'dataFetch',
@@ -143,13 +153,17 @@ module internal RequestStore =
         store.AddOrUpdate(source.Name, (source, [r]), (fun _ (_, requests) -> (source, r::requests))) |> ignore
         store
     
-    let resolve (fn: DataSource -> BlockedFetch list -> PerformFetch) (store: RequestStore) =
-        let asyncs = 
-            store
-            |> Seq.fold(fun acc (KeyValue(_, (s, b))) -> 
-                match fn s b with
-                | SyncFetch _ -> acc
-                | AsyncFetch a -> a::acc) [] 
+    let resolve (fn: DataSource -> BlockedFetch list -> PerformFetch list) (store: RequestStore) =
+        let collect =
+            List.fold(fun acc e ->
+                match e with
+                | SyncFetch cont -> 
+                    cont()
+                    acc
+                | AsyncFetch cont ->
+                    let a = cont()
+                    a::acc) []
+        let asyncs = store |> Seq.fold(fun acc (KeyValue(_, (s, b))) -> (collect (fn s b))@acc) []
         asyncs |> Async.Parallel |> Async.RunSynchronously |> ignore
 
 [<RequireQualifiedAccess>]
@@ -163,9 +177,10 @@ module FetchResult =
 
 [<RequireQualifiedAccess>]
 module DataSource =
-    let create (name: string) (fetchfn: BlockedFetch<'a, 'r> list -> PerformFetch): DataSource<'a, 'r> = upcast { DataSourceDefinition.Name = name; FetchFn = fetchfn }  
+    let create (name: string) (fetchfn: BlockedFetch<'a, 'r> list -> PerformFetch list): DataSource<'a, 'r> = upcast { DataSourceDefinition.Name = name; FetchFn = fetchfn }  
 [<RequireQualifiedAccess>]
 module Fetch =
+    /// Lifts a value into a completed fetch
     let lift a = { unFetch = fun env -> Done(a)}
 
     let failedwith exn = { unFetch = fun env -> FailedWith exn}

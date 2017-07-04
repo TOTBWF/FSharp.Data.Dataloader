@@ -34,15 +34,16 @@ type BlogRequest<'a> =
 let blogDataSource() = 
     let fetchfn (blocked: BlockedFetch<'a, BlogRequest<'a>> list) = 
         blocked
-        |> List.iter(fun b ->
+        |> List.map(fun b ->
             match b.Request with
             | FetchPosts cont -> 
-                let ids = env.PostIds
-                FetchResult.putSuccess (b.Status) (cont ids)
+                SyncFetch(fun () -> 
+                    let ids = env.PostIds
+                    FetchResult.putSuccess (b.Status) (cont ids))
             | FetchPostContent(id, cont) ->
-                let content = Map.tryFind id env.PostContents
-                FetchResult.putSuccess (b.Status) (cont content))
-        |> SyncFetch
+                SyncFetch(fun () ->
+                    let content = Map.tryFind id env.PostContents
+                    FetchResult.putSuccess (b.Status) (cont content)))
     DataSource.create "Blog" fetchfn 
 
 
