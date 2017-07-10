@@ -1,43 +1,54 @@
-module rec FSharp.Data.Dataloader
+module FSharp.Data.Dataloader
 
 open System
 open System.Reflection
+open FSharp.Reflection.FSharpReflectionExtensions
 open System.Collections.Concurrent
 
 /// Represents an instruction to the system on how to fetch a value of type 'a
-type Fetch<'a> = { unFetch : Environment -> Result<'a> }
+type Fetch<'a> = 
+    { unFetch : Environment -> Result<'a> }
 
-type Environment = {
+
+and Environment = {
     Cache : DataCache ref
     Store : RequestStore ref
     Trace : bool
 }
+
+
+/// Represents some Monadic operation on a fetch value
+and FetchExpr<'a> = 
+    abstract ToFetch : unit -> Fetch<'a>
+    abstract MapCompose : ('a -> 'c) -> FetchExpr<'c> option 
+    abstract BindCompose : ('a -> Fetch<'c>) -> FetchExpr<'c> option 
+    
 /// Type representing the result of a data fetch
 /// Done represents a completed fetch with value of type 'a
-type Result<'a> =
+and Result<'a> =
     | Done of 'a
-    | Blocked of BlockedFetch list * Fetch<'a>
+    | Blocked of BlockedFetch list * FetchExpr<'a>
     | FailedWith of exn
 
 /// Type representing the status of a blocked request
-type FetchStatus<'a> =
+and FetchStatus<'a> =
     | NotFetched
     | FetchSuccess of 'a
     | FetchError of exn
 
 /// Untyped version of our FetchResult reference wrapper, used for caching
-type FetchResult = 
+and FetchResult = 
     abstract GetStatus : unit -> FetchStatus<obj>
     abstract SetStatus : FetchStatus<obj> -> unit
 
 /// Typed version of our FetchResult reference wrapper, to be presented to the user
-type FetchResult<'a> = 
+and FetchResult<'a> = 
     inherit FetchResult
     abstract GetStatus : unit -> FetchStatus<'a>
     abstract SetStatus : FetchStatus<'a> -> unit
 
 /// Creates a wrapper around a mutable status value, with typed and untyped accessors
-type internal FetchResultDefinition<'a>(status: FetchStatus<'a>) = 
+and internal FetchResultDefinition<'a>(status: FetchStatus<'a>) = 
     let boxStatus s = 
         match s with
         | NotFetched -> NotFetched
@@ -61,32 +72,32 @@ type internal FetchResultDefinition<'a>(status: FetchStatus<'a>) =
 
 /// Result type of a fetch
 /// If the result type is asynchronous then all results will be batched
-type PerformFetch =
+and PerformFetch =
     | SyncFetch of (unit -> unit)
     | AsyncFetch of (unit -> Async<unit>)
 
 /// Represents an untyped Request, used to power the caching side
-type Request = 
+and Request = 
     abstract Identifier : string
 
 /// Represents an typed Request, used to implement the user defined request types
-type Request<'a> =  
+and Request<'a> =  
     inherit Request
 
 /// Untyped version of Datasource, used primarily for heterogenous caches
-type DataSource = 
+and DataSource = 
     abstract Name : string
     abstract FetchFn : BlockedFetch list -> PerformFetch list
 
 /// A source of data that will be fetched from
-type DataSource<'a, 'r when 'r :> Request<'a>> =
+and DataSource<'a, 'r when 'r :> Request<'a>> =
     /// Applied for every blocked request in a given round
     abstract FetchFn : BlockedFetch<'a, 'r> list -> PerformFetch list
     inherit DataSource
 
 /// An implementation of the data source interfaces
 /// Used so that we can transform between typed and untyped versions
-type internal DataSourceDefinition<'a, 'r when 'r :> Request<'a>> = 
+and internal DataSourceDefinition<'a, 'r when 'r :> Request<'a>> = 
     {
         Name : string
         FetchFn : BlockedFetch<'a, 'r> list -> PerformFetch list
@@ -100,19 +111,19 @@ type internal DataSourceDefinition<'a, 'r when 'r :> Request<'a>> =
     
 
 /// Untyped verion of a blocked fetch, used for the internals of the library
-type BlockedFetch =
-    abstract Request : obj
+and BlockedFetch =
+    abstract Request : Request
     abstract Status : FetchResult
 
 /// Typed version of a blocked fetch, presented to the user as a part of FetchFn
-type BlockedFetch<'a, 'r when 'r :> Request<'a>> =
+and BlockedFetch<'a, 'r when 'r :> Request<'a>> =
     abstract Request : 'r
     abstract Status : FetchResult<'a>
     inherit BlockedFetch
 
 /// An implementation of the blockedFetch interfaces
 /// Used so that we can freely move between the typed and untyped versions 
-type internal BlockedFetchDefinition<'a, 'r when 'r :> Request<'a>> = 
+and internal BlockedFetchDefinition<'a, 'r when 'r :> Request<'a>> = 
     {
         Request : 'r
         Status : FetchResult<'a>
@@ -121,16 +132,16 @@ type internal BlockedFetchDefinition<'a, 'r when 'r :> Request<'a>> =
         member x.Request = x.Request
         member x.Status = x.Status
     interface BlockedFetch with
-        member x.Request = box x.Request
+        member x.Request = upcast x.Request
         member x.Status = upcast x.Status
 
 /// Our cache of result values
-type DataCache = ConcurrentDictionary<string, FetchResult>
+and DataCache = ConcurrentDictionary<string, FetchResult>
 
 /// When a request is issued by the client via a 'dataFetch',
 /// It is placed in the RequestStore. When we are ready to fetch a batch of requests,
 /// 'performFetch' is called
-type RequestStore = ConcurrentDictionary<string, DataSource * BlockedFetch list>
+and RequestStore = ConcurrentDictionary<string, DataSource * BlockedFetch list>
 
 [<RequireQualifiedAccess>]
 module internal DataCache =
@@ -178,8 +189,75 @@ module FetchResult =
 [<RequireQualifiedAccess>]
 module DataSource =
     let create (name: string) (fetchfn: BlockedFetch<'a, 'r> list -> PerformFetch list): DataSource<'a, 'r> = upcast { DataSourceDefinition.Name = name; FetchFn = fetchfn }  
+
 [<RequireQualifiedAccess>]
 module Fetch =
+
+
+    /// Represents a monadic operation on a fetch value
+    type Expr<'b, 'a> =
+        | ConstExpr of Fetch<'a>
+        | MapExpr of ('b -> 'a) * FetchExpr<'b>
+        | ApplyExpr of FetchExpr<'b -> 'a> * FetchExpr<'b>
+        | BindExpr of ('b -> Fetch<'a>) * FetchExpr<'b>
+
+        // === KLUDGE ALERT ===
+        // There is some issues with using recursive modules and Generics (The generic can somehow leak...)
+        // Because of this, we need to define all of our monadic functions twice, so once for the expr to use
+        // The other for the Fetch module. If we dont, we cant order them in such a way that they can see one another
+        member private __.Map f a =
+                let unFetch = fun env ->
+                    match a.unFetch env with
+                    | Done x -> Done(f x)
+                    | Blocked (br, c) -> Blocked(br, MapExpr(f, c))
+                    | FailedWith exn -> FailedWith exn
+                { unFetch = unFetch }
+        member private __.ApplyTo a f =
+            let unFetch = fun env ->
+                match a.unFetch env, f.unFetch env with
+                | Done a', Done f' -> Done(f' a')
+                | Done a', Blocked(br, f') -> Blocked(br, MapExpr((|>) (a'), f'))
+                | Blocked(br, a'), Done(f') -> Blocked(br, MapExpr(unbox >> f', a'))
+                | Blocked(br1, a'), Blocked(br2, f') -> Blocked(br1@br2, ApplyExpr(f', a'))
+                | FailedWith exn, _ -> FailedWith exn
+                | _, FailedWith exn -> FailedWith exn
+            { unFetch = unFetch }
+        
+        /// Applies some binding function f to the inner value of a
+        member private __.Bind f a =
+            let unFetch = fun env ->
+                match a.unFetch env with
+                | Done x -> (f x).unFetch env
+                | Blocked(br, c) -> Blocked(br, BindExpr(f, c))
+                | FailedWith exn -> FailedWith exn
+            { unFetch = unFetch }
+        interface FetchExpr<'a> with
+            // Used to compose two consecutive map functions into one
+            member x.MapCompose (f: 'a -> 'c): FetchExpr<'c> option =
+                match x with
+                | MapExpr(g, v) -> MapExpr(g >> f, v) :> FetchExpr<'c> |> Some
+                | _ -> None
+            // Used to compose two consecutive bind functions into one
+            member x.BindCompose<'c> (f: 'a -> Fetch<'c>): FetchExpr<'c> option =
+                match x with
+                | BindExpr(g, v) -> BindExpr((fun b -> x.Bind f (g b)), v) :> FetchExpr<'c> |> Some
+                | _ -> None
+            // Transforms an Expr into a fetch, while applying tree optimizations
+            member x.ToFetch () = 
+                match x with
+                | ConstExpr f -> f
+                | MapExpr(f, v) ->
+                    match v.MapCompose(f) with
+                    | Some e -> e.ToFetch()
+                    | None -> x.Map f (v.ToFetch())
+                | ApplyExpr(f, v) -> x.ApplyTo (v.ToFetch()) (f.ToFetch())
+                | BindExpr(f, v) ->
+                    match v.BindCompose(f) with
+                    | Some e -> e.ToFetch()
+                    | None -> x.Bind f (v.ToFetch())
+
+
+    // Takes a cont and an op and turns it into an ExFetchOp
     /// Lifts a value into a completed fetch
     let lift a = { unFetch = fun env -> Done(a)}
 
@@ -189,28 +267,28 @@ module Fetch =
         let unFetch = fun env ->
             match a.unFetch env with
             | Done x -> Done(f x)
-            | Blocked (br, c) -> Blocked(br, (map f c))
+            | Blocked (br, c) -> Blocked(br, MapExpr(f, c))
             | FailedWith exn -> FailedWith exn
         { unFetch = unFetch }
 
     /// Applies some wrapped function f to the inner value of a
-    let rec applyTo (a: Fetch<'a>) (f: Fetch<('a -> 'b)>) =
+    and applyTo a f =
         let unFetch = fun env ->
             match a.unFetch env, f.unFetch env with
             | Done a', Done f' -> Done(f' a')
-            | Done a', Blocked(br, f') -> Blocked(br, applyTo { unFetch = fun env -> Done a' } f')
-            | Blocked(br, a'), Done(f') -> Blocked(br, map f' a')
-            | Blocked(br1, a'), Blocked(br2, f') -> Blocked(br1@br2, applyTo a' f')
+            | Done a', Blocked(br, f') -> Blocked(br, MapExpr((|>) (a'), f'))
+            | Blocked(br, a'), Done(f') -> Blocked(br, MapExpr(unbox >> f', a'))
+            | Blocked(br1, a'), Blocked(br2, f') -> Blocked(br1@br2, ApplyExpr(f', a'))
             | FailedWith exn, _ -> FailedWith exn
             | _, FailedWith exn -> FailedWith exn
         { unFetch = unFetch }
     
     /// Applies some binding function f to the inner value of a
-    let rec bind f a =
+    let rec bind (f: 'a -> Fetch<'b>) (a: Fetch<'a>): Fetch<'b> =
         let unFetch = fun env ->
             match a.unFetch env with
             | Done x -> (f x).unFetch env
-            | Blocked(br, x) -> Blocked(br, bind f x)
+            | Blocked(br, c) -> Blocked(br, BindExpr(f, c))
             | FailedWith exn -> FailedWith exn
         { unFetch = unFetch }
     
@@ -223,7 +301,7 @@ module Fetch =
     let collect (a: seq<Fetch<'a>>): Fetch<seq<'a>> =
         let cons (x: Fetch<'a>) ys = x |> map(fun v -> Seq.append [v]) |> applyTo ys
         Seq.foldBack cons a (lift Seq.empty)
-    
+
     /// Transforms a request into a fetch operation
     let dataFetch<'a, 'r when 'r :> Request<'a>> (d: DataSource<'a, 'r>) (a: 'r): Fetch<'a> =
         let cont (statusWrapper: FetchResult<'a>) = 
@@ -231,7 +309,7 @@ module Fetch =
                 match statusWrapper.GetStatus() with
                 | FetchSuccess s -> Done(s)
                 | _ -> FailedWith (Failure "Expected Complete Fetch!")
-            { unFetch = unFetch }
+            { unFetch = unFetch } |> ConstExpr
         let unFetch env =
             let cache = !(env.Cache)
             // Do a lookup in the cache to see if we need to return 
@@ -270,7 +348,7 @@ module Fetch =
     /// Fn should fill in the reference value of the BlockedRequest
     let runFetch trace fetch =
         let env = { Cache = ref (DataCache.empty ()); Store = ref (RequestStore.empty ()) ; Trace = trace}
-        let rec helper f =
+        let rec helper (f: Fetch<'a>) =
             match f.unFetch env with
             | Done a -> 
                 if trace then printfn "Fetch is completed!"
@@ -280,7 +358,7 @@ module Fetch =
                 performFetches (!(env.Store))
                 // Clear out the request cache
                 env.Store := RequestStore.empty()
-                helper cont
+                helper (cont.ToFetch())
             | FailedWith ex -> raise ex
         helper fetch
 

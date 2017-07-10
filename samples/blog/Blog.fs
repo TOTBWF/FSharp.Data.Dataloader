@@ -14,7 +14,7 @@ type Enviroment = {
 
 let env = {
     PostIds = [1;2]
-    PostContents = Map.ofList [1, "Test1"; 2, "Test2"]
+    PostContents = Map.ofList [1, "Test 1"; 2, "Test 2"]
 }
 
 // The original HAXL library relies HEAVYILY on GADTS for request types
@@ -58,7 +58,8 @@ let main args =
     let posts = 
         fetchPostIds
         |> Fetch.bind(Fetch.mapSeq fetchPostContent)
-        |> Fetch.map(Seq.map(Option.defaultWith(fun () -> "")) >> Seq.toList)
+        |> Fetch.map(Seq.map(Option.defaultWith(fun () -> "")))
+        |> Fetch.map(Seq.toList)
     let contents =
         fetchPostIds
         |> Fetch.map(renderPosts)
