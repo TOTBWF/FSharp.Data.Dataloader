@@ -205,14 +205,14 @@ module Fetch =
         // There is some issues with using recursive modules and Generics (The generic can somehow leak...)
         // Because of this, we need to define all of our monadic functions twice, so once for the expr to use
         // The other for the Fetch module. If we dont, we cant order them in such a way that they can see one another
-        member private __.Map f a =
+        static member Map f a =
                 let unFetch = fun env ->
                     match a.unFetch env with
                     | Done x -> Done(f x)
                     | Blocked (br, c) -> Blocked(br, MapExpr(f, c))
                     | FailedWith exn -> FailedWith exn
                 { unFetch = unFetch }
-        member private __.ApplyTo a f =
+        static member ApplyTo a f =
             let unFetch = fun env ->
                 match a.unFetch env, f.unFetch env with
                 | Done a', Done f' -> Done(f' a')
@@ -224,13 +224,14 @@ module Fetch =
             { unFetch = unFetch }
         
         /// Applies some binding function f to the inner value of a
-        member private __.Bind f a =
+        static member Bind f a =
             let unFetch = fun env ->
                 match a.unFetch env with
                 | Done x -> (f x).unFetch env
                 | Blocked(br, c) -> Blocked(br, BindExpr(f, c))
                 | FailedWith exn -> FailedWith exn
             { unFetch = unFetch }
+
         interface FetchExpr<'a> with
             // Used to compose two consecutive map functions into one
             member x.MapCompose (f: 'a -> 'c): FetchExpr<'c> option =
@@ -240,7 +241,7 @@ module Fetch =
             // Used to compose two consecutive bind functions into one
             member x.BindCompose<'c> (f: 'a -> Fetch<'c>): FetchExpr<'c> option =
                 match x with
-                | BindExpr(g, v) -> BindExpr((fun b -> x.Bind f (g b)), v) :> FetchExpr<'c> |> Some
+                | BindExpr(g, v) -> BindExpr((fun b -> Expr<_,_>.Bind f (g b)), v) :> FetchExpr<'c> |> Some
                 | _ -> None
             // Transforms an Expr into a fetch, while applying tree optimizations
             member x.ToFetch () = 
@@ -249,12 +250,12 @@ module Fetch =
                 | MapExpr(f, v) ->
                     match v.MapCompose(f) with
                     | Some e -> e.ToFetch()
-                    | None -> x.Map f (v.ToFetch())
-                | ApplyExpr(f, v) -> x.ApplyTo (v.ToFetch()) (f.ToFetch())
+                    | None -> Expr<_,_>.Map f (v.ToFetch())
+                | ApplyExpr(f, v) -> Expr<_,_>.ApplyTo (v.ToFetch()) (f.ToFetch())
                 | BindExpr(f, v) ->
                     match v.BindCompose(f) with
                     | Some e -> e.ToFetch()
-                    | None -> x.Bind f (v.ToFetch())
+                    | None -> Expr<_,_>.Bind f (v.ToFetch())
 
 
     // Takes a cont and an op and turns it into an ExFetchOp
@@ -263,34 +264,13 @@ module Fetch =
 
     let failedwith exn = { unFetch = fun env -> FailedWith exn}
     /// Applies a mapping function f to the inner value of a
-    let rec map f a =
-        let unFetch = fun env ->
-            match a.unFetch env with
-            | Done x -> Done(f x)
-            | Blocked (br, c) -> Blocked(br, MapExpr(f, c))
-            | FailedWith exn -> FailedWith exn
-        { unFetch = unFetch }
+    let map = Expr<_,_>.Map
 
     /// Applies some wrapped function f to the inner value of a
-    and applyTo a f =
-        let unFetch = fun env ->
-            match a.unFetch env, f.unFetch env with
-            | Done a', Done f' -> Done(f' a')
-            | Done a', Blocked(br, f') -> Blocked(br, MapExpr((|>) (a'), f'))
-            | Blocked(br, a'), Done(f') -> Blocked(br, MapExpr(unbox >> f', a'))
-            | Blocked(br1, a'), Blocked(br2, f') -> Blocked(br1@br2, ApplyExpr(f', a'))
-            | FailedWith exn, _ -> FailedWith exn
-            | _, FailedWith exn -> FailedWith exn
-        { unFetch = unFetch }
+    let applyTo = Expr<_,_>.ApplyTo
     
     /// Applies some binding function f to the inner value of a
-    let rec bind (f: 'a -> Fetch<'b>) (a: Fetch<'a>): Fetch<'b> =
-        let unFetch = fun env ->
-            match a.unFetch env with
-            | Done x -> (f x).unFetch env
-            | Blocked(br, c) -> Blocked(br, BindExpr(f, c))
-            | FailedWith exn -> FailedWith exn
-        { unFetch = unFetch }
+    let rec bind = Expr<_,_>.Bind
     
     /// Applies a bind function to a sequence of values, production a fetch of a sequence
     let mapSeq (f: 'a -> Fetch<'b>) (a: seq<'a>) =
