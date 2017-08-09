@@ -373,11 +373,11 @@ module Fetch =
 module FetchExtensions =
     type FetchBuilder() = 
         member __.Return(x) = Fetch.lift x
-        member __.ReturnFrom(x) = x
+        member __.ReturnFrom(x: Fetch<'a>) = x
         member __.Zero() = Fetch.lift ()
         member __.Bind(m, f) = Fetch.bind f m
         /// We need to overload bind for tuples to make use of batching
         member __.Bind((m1, m2), f) = Fetch.bind f (Fetch.zip m1 m2) 
-        member __.Combine(m1, m2) = Fetch.bind(fun _ -> m2) m1
-        member __.Delay(f) = f
+        member __.Combine(m1: Fetch<unit>, m2: Fetch<'a>) = Fetch.bind(fun _ -> m2) m1
+        member __.Delay(f: unit -> Fetch<'a>) = f()
     let fetch = FetchBuilder()
