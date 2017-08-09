@@ -270,6 +270,10 @@ module Fetch =
     
     /// Applies some binding function f to the inner value of a
     let rec bind = Expr<_,_>.Bind
+
+    /// Creates a fetch that runs 2 fetches concurrently and the collects their result as a tuple
+    let zip f1 f2 = 
+        applyTo f2 (map (fun a b -> a, b) f1)
     
     /// Applies a bind function to a sequence of values, production a fetch of a sequence
     let mapSeq (f: 'a -> Fetch<'b>) (a: seq<'a>) =
@@ -362,3 +366,13 @@ module Fetch =
             | FailedWith ex -> raise ex
         helper fetch
 
+[<AutoOpen>]
+module FetchExtensions =
+    type FetchBuilder() = 
+        member __.Return(x) = Fetch.lift x
+        member __.ReturnFrom(x) = x
+        member __.Zero() = Fetch.lift ()
+        member __.Bind(m, f) = Fetch.bind f m
+        /// We need to overload bind for tuples to make use of batching
+        member __.Bind((m1, m2), f) = Fetch.bind f (Fetch.zip m1 m2) 
+    let fetch = FetchBuilder()
