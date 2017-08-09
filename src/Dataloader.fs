@@ -327,6 +327,7 @@ module Fetch =
             let unFetch env = 
                 match statusWrapper.GetStatus() with
                 | FetchSuccess s -> Done(s)
+                | FetchError e -> raise e
                 | _ -> FailedWith (Failure "Expected Complete Fetch!")
             { unFetch = unFetch } |> ConstExpr
         let unFetch env =
