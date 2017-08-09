@@ -378,4 +378,5 @@ module FetchExtensions =
         member __.Bind(m, f) = Fetch.bind f m
         /// We need to overload bind for tuples to make use of batching
         member __.Bind((m1, m2), f) = Fetch.bind f (Fetch.zip m1 m2) 
+        member __.Combine(m1, m2) = Fetch.bind(fun _ -> m2) m1
     let fetch = FetchBuilder()
