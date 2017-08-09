@@ -319,6 +319,25 @@ module Fetch =
                 Blocked([blockedReq], cont status)
         { unFetch = unFetch }
     
+
+    /// Creates a Fetch from a Request that will ignore the cache. This is useful in cases where the fetch will be performing mutations.
+    /// Be careful that any mutations do not conflict with reads of the same data.
+    let uncachedFetch<'a, 'r when 'r :> Request<'a>> (d: DataSource<'a, 'r>) (a: 'r): Fetch<'a> =
+        let cont (statusWrapper: FetchResult<'a>) = 
+            let unFetch env = 
+                match statusWrapper.GetStatus() with
+                | FetchSuccess s -> Done(s)
+                | _ -> FailedWith (Failure "Expected Complete Fetch!")
+            { unFetch = unFetch } |> ConstExpr
+        let unFetch env =
+            // We are going to totally skip the cache here
+            if env.Trace then printfn "Request %s is being run as an uncached request" a.Identifier
+            let status = FetchResultDefinition(NotFetched)
+            let blockedReq = {Request = a; Status = status}
+            RequestStore.addRequest blockedReq d !(env.Store) |> ignore
+            Blocked([blockedReq], cont status)
+        { unFetch = unFetch }
+    
     /// Issues a batch of fetches to the request store. After 
     /// 'performFetchs' is complete, all of the BlockedRequests status refs are full
     let performFetches (store: RequestStore) =
