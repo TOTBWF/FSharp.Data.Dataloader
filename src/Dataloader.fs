@@ -16,7 +16,6 @@ and Environment = {
     Trace : bool
 }
 
-
 /// Represents some Monadic operation on a fetch value
 and FetchExpr<'a> = 
     abstract ToFetch : unit -> Fetch<'a>
@@ -288,7 +287,8 @@ module Fetch =
             let unFetch env = 
                 match statusWrapper.GetStatus() with
                 | FetchSuccess s -> Done(s)
-                | _ -> FailedWith (Failure "Expected Complete Fetch!")
+                | FetchError e -> raise e
+                | NotFetched -> FailedWith (Failure "Expected Complete Fetch!")
             { unFetch = unFetch } |> ConstExpr
         let unFetch env =
             let cache = !(env.Cache)
