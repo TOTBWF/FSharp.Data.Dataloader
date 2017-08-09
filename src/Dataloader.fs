@@ -279,6 +279,9 @@ module Fetch =
     let mapSeq (f: 'a -> Fetch<'b>) (a: seq<'a>) =
         let cons (x: 'a) ys = (f x) |> map(fun v -> Seq.append [v]) |> applyTo ys
         Seq.foldBack cons a (lift Seq.empty)
+
+    let iterSeq (f: 'a -> Fetch<unit>) (a: seq<'a>): Fetch<unit> =
+        Seq.fold(fun _ e -> f e) (lift ()) a
     
     /// Collects a seq of fetches into a singular fetch of sequences
     let collect (a: seq<Fetch<'a>>): Fetch<seq<'a>> =
