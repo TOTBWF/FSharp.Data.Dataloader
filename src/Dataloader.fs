@@ -149,6 +149,10 @@ module internal DataCache =
         c.AddOrUpdate(r.Identifier, status, (fun _ _ -> status)) |> ignore
         c
     
+    let remove (r: Request) (c: DataCache): DataCache =
+        match c.TryRemove(r.Identifier) with
+        | _, _ -> c
+    
     let get<'a> (r: Request) (c: DataCache): FetchResult<'a> option =
         match c.TryGetValue(r.Identifier) with
         | true, status -> 
@@ -274,6 +278,11 @@ module Fetch =
     /// Creates a fetch that runs 2 fetches concurrently and the collects their result as a tuple
     let zip f1 f2 = 
         applyTo f2 (map (fun a b -> a, b) f1)
+    let zip3 f1 f2 f3 = 
+        applyTo f3 (applyTo f2 (map (fun a b c -> a,b,c) f1))
+
+    let zip4 f1 f2 f3 f4 = 
+        applyTo f4 (applyTo f3 (applyTo f2 (map (fun a b c d -> a,b,c,d) f1)))
     
     /// Applies a bind function to a sequence of values, production a fetch of a sequence
     let mapSeq (f: 'a -> Fetch<'b>) (a: seq<'a>) =
@@ -281,7 +290,7 @@ module Fetch =
         Seq.foldBack cons a (lift Seq.empty)
 
     let iterSeq (f: 'a -> Fetch<unit>) (a: seq<'a>): Fetch<unit> =
-        Seq.fold(fun _ e -> f e) (lift ()) a
+        Seq.fold(fun acc e -> acc |> bind(fun () -> f e)) (lift ()) a
     
     /// Collects a seq of fetches into a singular fetch of sequences
     let collect (a: seq<Fetch<'a>>): Fetch<seq<'a>> =
@@ -328,7 +337,7 @@ module Fetch =
     
 
     /// Creates a Fetch from a Request that will ignore the cache. This is useful in cases where the fetch will be performing mutations.
-    /// Be careful that any mutations do not conflict with reads of the same data.
+    /// Be careful that any mutations do not conflict with reads of the same data. If it does, use invalidateCache on potentially offending requests
     let uncachedFetch<'a, 'r when 'r :> Request<'a>> (d: DataSource<'a, 'r>) (a: 'r): Fetch<'a> =
         let cont (statusWrapper: FetchResult<'a>) = 
             let unFetch env = 
@@ -345,6 +354,16 @@ module Fetch =
             RequestStore.addRequest blockedReq d !(env.Store) |> ignore
             Blocked([blockedReq], cont status)
         { unFetch = unFetch }
+    
+
+    /// Removes a request from the cache upon the execution of a given fetch. Used for invalidating the cache when a mutation occurs.
+    let invalidateCache<'a, 'r when 'r :> Request<unit>> (d: DataSource) (a: 'r) (f: Fetch<'a>): Fetch<'a> =
+        let unFetch env =
+            let cache = !(env.Cache)
+            if env.Trace then printfn "Request %s is being invalidated" a.Identifier
+            DataCache.remove a cache |> ignore
+            f.unFetch env
+        { unFetch = unFetch}
     
     /// Issues a batch of fetches to the request store. After 
     /// 'performFetchs' is complete, all of the BlockedRequests status refs are full
@@ -372,12 +391,14 @@ module Fetch =
 [<AutoOpen>]
 module FetchExtensions =
     type FetchBuilder() = 
-        member __.Return(x) = Fetch.lift x
-        member __.ReturnFrom(x: Fetch<'a>) = x
-        member __.Zero() = Fetch.lift ()
-        member __.Bind(m, f) = Fetch.bind f m
-        /// We need to overload bind for tuples to make use of batching
-        member __.Bind((m1, m2), f) = Fetch.bind f (Fetch.zip m1 m2) 
-        member __.Combine(m1: Fetch<unit>, m2: Fetch<'a>) = Fetch.bind(fun _ -> m2) m1
-        member __.Delay(f: unit -> Fetch<'a>) = f()
+        member inline __.Return(x) = Fetch.lift x
+        member inline __.ReturnFrom(x: Fetch<'a>) = x
+        member inline __.Zero() = Fetch.lift ()
+        member inline __.Bind(m: Fetch<'a>, f: 'a -> Fetch<'b>) = Fetch.bind f m
+        /// We inline need to overload bind for tuples to make use of batching
+        member inline __.Bind((m1, m2), f) = Fetch.bind f (Fetch.zip m1 m2) 
+        member inline __.Bind((m1, m2, m3), f) = Fetch.bind f (Fetch.zip3 m1 m2 m3) 
+        member inline __.Bind((m1, m2, m3, m4), f) = Fetch.bind f (Fetch.zip4 m1 m2 m3 m4) 
+        member inline __.Combine(m1: Fetch<unit>, m2: Fetch<'a>) = Fetch.bind(fun _ -> m2) m1
+        member inline __.Delay(f: unit -> Fetch<'a>) = f()
     let fetch = FetchBuilder()
