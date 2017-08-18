@@ -2,6 +2,7 @@ module FSharp.Data.Dataloader
 
 open System
 open System.Reflection
+open System.Runtime.ExceptionServices
 open FSharp.Reflection.FSharpReflectionExtensions
 open System.Collections.Concurrent
 
@@ -27,13 +28,13 @@ and FetchExpr<'a> =
 and Result<'a> =
     | Done of 'a
     | Blocked of BlockedFetch list * FetchExpr<'a>
-    | FailedWith of exn
+    | FailedWith of ExceptionDispatchInfo
 
 /// Type representing the status of a blocked request
 and FetchStatus<'a> =
     | NotFetched
     | FetchSuccess of 'a
-    | FetchError of exn
+    | FetchError of ExceptionDispatchInfo
 
 /// Untyped version of our FetchResult reference wrapper, used for caching
 and FetchResult = 
@@ -186,7 +187,7 @@ module FetchResult =
         f.SetStatus(FetchSuccess(v))
     
     let putFailure (f: FetchResult<'a>) (e: exn)=
-        let (fe: FetchStatus<'a>) = FetchError(e)
+        let (fe: FetchStatus<'a>) = FetchError(ExceptionDispatchInfo.Capture(e))
         f.SetStatus(fe)
 
 [<RequireQualifiedAccess>]
@@ -296,15 +297,15 @@ module Fetch =
     let collect (a: seq<Fetch<'a>>): Fetch<seq<'a>> =
         let cons (x: Fetch<'a>) ys = x |> map(fun v -> Seq.append [v]) |> applyTo ys
         Seq.foldBack cons a (lift Seq.empty)
-
+    
     /// Transforms a request into a fetch operation
     let dataFetch<'a, 'r when 'r :> Request<'a>> (d: DataSource<'a, 'r>) (a: 'r): Fetch<'a> =
         let cont (statusWrapper: FetchResult<'a>) = 
             let unFetch env = 
                 match statusWrapper.GetStatus() with
                 | FetchSuccess s -> Done(s)
-                | FetchError e -> raise e
-                | NotFetched -> FailedWith (Failure "Expected Complete Fetch!")
+                | FetchError e -> FailedWith e
+                | NotFetched -> FailedWith (ExceptionDispatchInfo.Capture(Failure "Expected Complete Fetch!"))
             { unFetch = unFetch } |> ConstExpr
         let unFetch env =
             let cache = !(env.Cache)
@@ -321,7 +322,7 @@ module Fetch =
                     // We've seen the request before, but it is blocked, but we dont add the request to the RequestStore
                     Blocked([], cont statusWrapper)
                 | FetchError ex ->
-                    if env.Trace then printfn "Request %s failed with exception %s" a.Identifier ex.Message
+                    if env.Trace then printfn "Request %s failed with exception %s" a.Identifier ex.SourceException.Message
                     // There was an error, so add the failure as our result
                     FailedWith ex
             | None -> 
@@ -343,8 +344,8 @@ module Fetch =
             let unFetch env = 
                 match statusWrapper.GetStatus() with
                 | FetchSuccess s -> Done(s)
-                | FetchError e -> raise e
-                | _ -> FailedWith (Failure "Expected Complete Fetch!")
+                | FetchError e -> FailedWith e
+                | _ -> FailedWith (ExceptionDispatchInfo.Capture(Failure "Expected Complete Fetch!"))
             { unFetch = unFetch } |> ConstExpr
         let unFetch env =
             // We are going to totally skip the cache here
@@ -385,7 +386,7 @@ module Fetch =
                 // Clear out the request cache
                 env.Store := RequestStore.empty()
                 helper (cont.ToFetch())
-            | FailedWith ex -> raise ex
+            | FailedWith ex -> ex.Throw(); failwith "Unreachable code reached. If you see this, weep uncontrollably."
         helper fetch
 
 [<AutoOpen>]
