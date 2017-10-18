@@ -12,8 +12,8 @@ type Fetch<'a> =
 
 
 and Environment = {
-    Cache : DataCache ref
-    Store : RequestStore ref
+    Cache : DataCache 
+    Store : RequestStore
     Trace : bool
 }
 
@@ -146,13 +146,11 @@ and RequestStore = ConcurrentDictionary<string, DataSource * BlockedFetch list>
 [<RequireQualifiedAccess>]
 module internal DataCache =
     let empty (): DataCache = new ConcurrentDictionary<string, FetchResult>()
-    let add (r: Request) (status: FetchResult) (c: DataCache): DataCache =
+    let add (r: Request) (status: FetchResult) (c: DataCache) =
         c.AddOrUpdate(r.Identifier, status, (fun _ _ -> status)) |> ignore
-        c
     
-    let remove (r: Request) (c: DataCache): DataCache =
-        match c.TryRemove(r.Identifier) with
-        | _, _ -> c
+    let remove (r: Request) (c: DataCache) =
+        c.TryRemove(r.Identifier) |> ignore
     
     let get<'a> (r: Request) (c: DataCache): FetchResult<'a> option =
         match c.TryGetValue(r.Identifier) with
@@ -165,8 +163,7 @@ module internal DataCache =
 module internal RequestStore =
     let empty (): RequestStore = new ConcurrentDictionary<string, DataSource * BlockedFetch list>()
     let addRequest (r: BlockedFetch) (source: DataSource) (store: RequestStore) =
-        store.AddOrUpdate(source.Name, (source, [r]), (fun _ (_, requests) -> (source, r::requests))) |> ignore
-        store
+        store.AddOrUpdate(source.Name + source.GetType().ToString(), (source, [r]), (fun _ (_, requests) -> (source, r::requests))) |> ignore
     
     let resolve (fn: DataSource -> BlockedFetch list -> PerformFetch list) (store: RequestStore) =
         let collect =
@@ -293,6 +290,10 @@ module Fetch =
     let iterSeq (f: 'a -> Fetch<unit>) (a: seq<'a>): Fetch<unit> =
         Seq.fold(fun acc e -> acc |> bind(fun () -> f e)) (lift ()) a
     
+    let mapList (f: 'a -> Fetch<'b>) (a: 'a list) =
+        let cons (x: 'a) ys = (f x) |> map(fun v -> List.append [v]) |> applyTo ys
+        List.foldBack cons a (lift [])
+    
     /// Collects a seq of fetches into a singular fetch of sequences
     let collect (a: seq<Fetch<'a>>): Fetch<seq<'a>> =
         let cons (x: Fetch<'a>) ys = x |> map(fun v -> Seq.append [v]) |> applyTo ys
@@ -301,14 +302,14 @@ module Fetch =
     /// Transforms a request into a fetch operation
     let dataFetch<'a, 'r when 'r :> Request<'a>> (d: DataSource<'a, 'r>) (a: 'r): Fetch<'a> =
         let cont (statusWrapper: FetchResult<'a>) = 
-            let unFetch env = 
+            let unFetch _ = 
                 match statusWrapper.GetStatus() with
                 | FetchSuccess s -> Done(s)
                 | FetchError e -> FailedWith e
                 | NotFetched -> FailedWith (ExceptionDispatchInfo.Capture(Failure "Expected Complete Fetch!"))
             { unFetch = unFetch } |> ConstExpr
         let unFetch env =
-            let cache = !(env.Cache)
+            let cache = env.Cache
             // Do a lookup in the cache to see if we need to return 
             match DataCache.get<'a> a cache with
             | Some statusWrapper ->
@@ -331,8 +332,8 @@ module Fetch =
                 let status = FetchResultDefinition(NotFetched)
                 let blockedReq = {Request = a; Status = status}
                 // Update the cache and store references
-                DataCache.add a status cache |> ignore
-                RequestStore.addRequest blockedReq d !(env.Store) |> ignore
+                DataCache.add a status cache 
+                RequestStore.addRequest blockedReq d env.Store
                 Blocked([blockedReq], cont status)
         { unFetch = unFetch }
     
@@ -352,7 +353,7 @@ module Fetch =
             if env.Trace then printfn "Request %s is being run as an uncached request" a.Identifier
             let status = FetchResultDefinition(NotFetched)
             let blockedReq = {Request = a; Status = status}
-            RequestStore.addRequest blockedReq d !(env.Store) |> ignore
+            RequestStore.addRequest blockedReq d env.Store
             Blocked([blockedReq], cont status)
         { unFetch = unFetch }
     
@@ -360,7 +361,7 @@ module Fetch =
     /// Removes a request from the cache upon the execution of a given fetch. Used for invalidating the cache when a mutation occurs.
     let invalidateCache<'a, 'r when 'r :> Request<unit>> (d: DataSource) (a: 'r) (f: Fetch<'a>): Fetch<'a> =
         let unFetch env =
-            let cache = !(env.Cache)
+            let cache = env.Cache
             if env.Trace then printfn "Request %s is being invalidated" a.Identifier
             DataCache.remove a cache |> ignore
             f.unFetch env
@@ -374,20 +375,20 @@ module Fetch =
     /// Executes a fetch using fn to resolve the blocked requests
     /// Fn should fill in the reference value of the BlockedRequest
     let runFetch trace fetch =
-        let env = { Cache = ref (DataCache.empty ()); Store = ref (RequestStore.empty ()) ; Trace = trace}
-        let rec helper (f: Fetch<'a>) =
+        let env = { Cache = DataCache.empty (); Store = RequestStore.empty () ; Trace = trace}
+        let rec helper (f: Fetch<'a>) (env: Environment) =
             match f.unFetch env with
             | Done a -> 
                 if trace then printfn "Fetch is completed!"
                 a
             | Blocked(br, cont) ->
                 if trace then printfn "Beginning fetch with round size %d" br.Length
-                performFetches (!(env.Store))
+                performFetches env.Store
                 // Clear out the request cache
-                env.Store := RequestStore.empty()
-                helper (cont.ToFetch())
+                let env' = { env with Store = RequestStore.empty()}
+                helper (cont.ToFetch()) env'
             | FailedWith ex -> ex.Throw(); failwith "Unreachable code reached. If you see this, weep uncontrollably."
-        helper fetch
+        helper fetch env
 
 [<AutoOpen>]
 module FetchExtensions =
