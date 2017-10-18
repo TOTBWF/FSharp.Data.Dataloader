@@ -342,7 +342,7 @@ module Fetch =
     /// Be careful that any mutations do not conflict with reads of the same data. If it does, use invalidateCache on potentially offending requests
     let uncachedFetch<'a, 'r when 'r :> Request<'a>> (d: DataSource<'a, 'r>) (a: 'r): Fetch<'a> =
         let cont (statusWrapper: FetchResult<'a>) = 
-            let unFetch env = 
+            let unFetch _ = 
                 match statusWrapper.GetStatus() with
                 | FetchSuccess s -> Done(s)
                 | FetchError e -> FailedWith e
@@ -403,4 +403,19 @@ module FetchExtensions =
         member inline __.Bind((m1, m2, m3, m4), f) = Fetch.bind f (Fetch.zip4 m1 m2 m3 m4) 
         member inline __.Combine(m1: Fetch<unit>, m2: Fetch<'a>) = Fetch.bind(fun _ -> m2) m1
         member inline __.Delay(f: unit -> Fetch<'a>) = f()
+        member inline x.TryWith(body: Fetch<'a>, handler : exn -> Fetch<'a>) =
+            try
+                x.ReturnFrom(body)
+            with e -> handler e
+        member inline x.TryFinally(body: Fetch<'a>, compensation: (unit -> unit)) =
+            try
+                x.ReturnFrom(body)
+            finally
+                compensation()
+        member inline x.Using(disposable: #System.IDisposable, body) =
+            let body' = body disposable
+            x.TryFinally(body', fun () ->
+                match disposable with
+                | null -> ()
+                | disp -> disp.Dispose())
     let fetch = FetchBuilder()
